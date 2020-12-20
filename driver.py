@@ -1,4 +1,4 @@
-from skimage.measure import structural_similarity as ssim
+from skimage.metrics import structural_similarity as ssim
 import subprocess
 import cv2
 import time
@@ -9,16 +9,25 @@ import pytesseract as pyt
 import RPi.GPIO as GPIO
 import requests as req
 
-photo_delay = 2
-barrier_delay = 10
-config = r'--oem 3 --psm 11 -c tessedit_char_whitelist=ACEFGHJKLMNPQRSTUVWXY0123456789 -c language_model_penalty_non_freq_dict_word=1 -c language_model_penalty_non_dict_word=1'
+def getToken():
+    url = 'http://localhost:9000/parkinglot-management-system/auth/signin'
+    data = '{"username": "rpi@rpi.com", "password": "rpirpirpi"}'
+    headers = {'Content-type': 'application/json'}
+    logindata = req.post(url, data=data, headers=headers)
+    return logindata.json()["accessToken"]
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(2, GPIO.OUT, initial=GPIO.LOW)
+def getList(token):
+    licenseList = []
+    url = 'http://localhost:9000/parkinglot-management-system/api/owners/cars'
+    headers = {'Authorization': 'Bearer ' + token}
+    response = req.get(url, headers=headers)
+    for i in response.json():
+        licenseList.append(i["licenseNumber"])
+    return licenseList
 
 def recog():
     time.sleep(photo_delay)
-    subprocess.call("raspistill -o /home/pi/hires.jpg -w 1920 -h 1080 -n")
+    subprocess.call("raspistill -o /home/pi/hires.jpg -w 1920 -h 1080 -n -t 1")
     img = cv2.imread("/home/pi/hires.jpg")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.bilateralFilter(gray, 15, 15, 15)
@@ -59,36 +68,44 @@ def recog():
         print(reocr)
         recognized = reocr.group(0)
         recognized = recognized.replace(" ", "")
+        subprocess.call("rm /home/pi/hires.jpg")
         return recognized
 
-subprocess.call("raspistill -o /home/pi/im1.jpg -w 640 -h 480 -n")
+
+def openBarrier():
+    GPIO.output(2, GPIO.HIGH)
+    time.sleep(barrier_delay)
+    GPIO.output(2, GPIO.LOW)
+
+photo_delay = 2
+barrier_delay = 10
+config = r'--oem 3 --psm 11 -c tessedit_char_whitelist=ACEFGHJKLMNPQRSTUVWXY0123456789 -c ' \
+         r'language_model_penalty_non_freq_dict_word=1 -c language_model_penalty_non_dict_word=1 '
+
+token = getToken()
+licenseList = getList(token)
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(2, GPIO.OUT, initial=GPIO.LOW)
+
+subprocess.call("raspistill -o /home/pi/im1.jpg -w 640 -h 480 -n -t 1")
 while True:
     time.sleep(photo_delay)
-    subprocess.call("raspistill -o /home/pi/im2.jpg -w 640 -h 480 -n")
+    subprocess.call("raspistill -o /home/pi/im2.jpg -w 640 -h 480 -n -t 1")
     image1 = cv2.imread("/home/pi/im1.jpg")
+    image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
     image2 = cv2.imread("/home/pi/im2.jpg")
+    image2 = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
     s = ssim(image1, image2)
-    if s < 0.6:
+    if s < 0.65:
         license = recog()
 
-        url = 'http://localhost:9000/parkinglot-management-system/auth/signin'
-        data = '{"username": "rpi@rpi.com", "password": "rpirpirpi"}'
-        headers = {'Content-type': 'application/json'}
-        logindata = req.post(url, data=data, headers=headers)
-
-        token = (logindata.json()["accessToken"])
-        url = 'http://localhost:9000/parkinglot-management-system/api/owners/cars'
-        headers = {'Authorization': 'Bearer ' + token}
-
-        list = []
-        response = req.get(url, headers=headers)
-        for i in response.json():
-            if license == i["licenseNumber"]:
-                GPIO.output(2, GPIO.HIGH)
-                time.sleep(barrier_delay)
-                GPIO.output(2, GPIO.LOW)
-
-        subprocess.call("rm /home/pi/hires.jpg")
+        if license in licenseList:
+            openBarrier()
+        else:
+            licenseList = getList(token)
+            if license in licenseList:
+                openBarrier()
 
     subprocess.call("rm /home/pi/im1.jpg")
     subprocess.call("mv /home/pi/im2.jpg /home/pi/im1.jpg")
